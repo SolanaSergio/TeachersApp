@@ -1,0 +1,5 @@
+{
+  "name": "Teacher's Super App",
+  "description": "An all-in-one application for teachers to generate custom books, create illustrations, produce audiobooks, research topics, and create video trailers for their educational content using the power of Gemini.",
+  "requestFramePermissions": []
+}
