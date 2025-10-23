@@ -1,6 +1,6 @@
 import { GoogleGenAI, Modality, GenerateContentResponse, LiveServerMessage, Blob, Type } from "@google/genai";
+import { View } from './types';
 import type { AspectRatio, ImageFile, GroundingChunk, SavedContent, SavedStorybookPage } from './types';
-import { decode as _decode, encode as _encode } from 'js-base64';
 
 // --- UTILS ---
 
@@ -69,6 +69,7 @@ export const decodeAudioData = async (
 // --- LOCALSTORAGE SERVICES ---
 
 const SAVED_CONTENT_KEY = 'teachersSuperApp_savedContent';
+const IN_PROGRESS_CONTENT_KEY = 'teachersSuperApp_inProgressContent';
 
 export const getSavedContent = (): SavedContent[] => {
     try {
@@ -134,6 +135,50 @@ export const deleteContent = (contentId: string): void => {
         localStorage.setItem(SAVED_CONTENT_KEY, JSON.stringify(allContent));
     } catch (error) {
         console.error("Failed to delete content:", error);
+    }
+};
+
+// --- AUTO-SAVE & RESUME SERVICES ---
+
+const getInProgressObject = (): { [key: string]: any } => {
+    try {
+        const rawContent = localStorage.getItem(IN_PROGRESS_CONTENT_KEY);
+        return rawContent ? JSON.parse(rawContent) : {};
+    } catch (error) {
+        console.error("Failed to get in-progress content:", error);
+        return {};
+    }
+};
+
+export const saveInProgress = (view: View, data: any): void => {
+    try {
+        const allInProgress = getInProgressObject();
+        allInProgress[view] = data;
+        localStorage.setItem(IN_PROGRESS_CONTENT_KEY, JSON.stringify(allInProgress));
+    } catch (error) {
+        console.error(`Failed to save in-progress content for ${view}:`, error);
+    }
+};
+
+export const loadInProgress = (view: View): any | null => {
+    try {
+        const allInProgress = getInProgressObject();
+        return allInProgress[view] || null;
+    } catch (error) {
+        console.error(`Failed to load in-progress content for ${view}:`, error);
+        return null;
+    }
+};
+
+export const clearInProgress = (view: View): void => {
+    try {
+        const allInProgress = getInProgressObject();
+        if (allInProgress[view]) {
+            delete allInProgress[view];
+            localStorage.setItem(IN_PROGRESS_CONTENT_KEY, JSON.stringify(allInProgress));
+        }
+    } catch (error) {
+        console.error(`Failed to clear in-progress content for ${view}:`, error);
     }
 };
 

@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { View, AspectRatio, ImageFile, GroundingChunk, SavedContent } from './types';
-import { BookIcon, ImageIcon, EditIcon, SearchIcon, MicIcon, VideoIcon, GlobeIcon, BrainCircuitIcon, MenuIcon, BookOpenIcon, HomeIcon, UploadCloudIcon, XIcon, SparklesIcon, ChevronLeftIcon, ChevronRightIcon, BookmarkIcon, ClipboardListIcon, TrashIcon } from './components/Icons';
+import { BookIcon, ImageIcon, EditIcon, SearchIcon, MicIcon, VideoIcon, GlobeIcon, BrainCircuitIcon, MenuIcon, BookOpenIcon, HomeIcon, UploadCloudIcon, XIcon, SparklesIcon, ChevronLeftIcon, ChevronRightIcon, BookmarkIcon, ClipboardListIcon, TrashIcon, DownloadIcon } from './components/Icons';
 import * as GeminiService from './services';
 import type { Session } from '@google/genai';
 
@@ -134,6 +134,16 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onFileSelect, accept, selec
         </div>
     );
 };
+
+const ResumePrompt: React.FC<{ onResume: () => void; onDismiss: () => void; }> = ({ onResume, onDismiss }) => (
+    <div className="bg-brand-secondary p-4 rounded-lg shadow-lg flex items-center justify-between mb-6">
+        <p className="text-brand-text font-semibold">You have unsaved progress. Would you like to resume?</p>
+        <div className="flex space-x-2">
+            <button onClick={onResume} className="bg-brand-accent text-white font-semibold py-2 px-4 rounded-lg hover:opacity-90 transition-opacity text-sm">Resume</button>
+            <button onClick={onDismiss} className="bg-slate-600 text-white font-semibold py-2 px-4 rounded-lg hover:bg-slate-500 transition-colors text-sm">Dismiss</button>
+        </div>
+    </div>
+);
 
 
 // --- VIEW COMPONENTS ---
@@ -458,9 +468,49 @@ const StorybookCreatorView: React.FC = () => {
     const [isLoading, setIsLoading] = useState(false);
     const [loadingMessage, setLoadingMessage] = useState('');
     const [savedStorybookId, setSavedStorybookId] = useState<string | null>(null);
+    const [showResumePrompt, setShowResumePrompt] = useState(false);
+
+    // Auto-save logic
+    useEffect(() => {
+        const interval = setInterval(() => {
+            if (prompt || pages.length > 0) {
+                // To avoid localStorage quota errors, only save text content, not the large image data URLs.
+                const pagesForAutosave = pages.map(page => ({
+                    text: page.text,
+                    imageUrl: '', // Exclude image data from auto-save
+                }));
+                GeminiService.saveInProgress(View.STORYBOOK_CREATOR, { prompt, pages: pagesForAutosave });
+            }
+        }, 60000); // 60 seconds
+
+        return () => clearInterval(interval);
+    }, [prompt, pages]);
+
+    // Resume logic on mount
+    useEffect(() => {
+        const savedProgress = GeminiService.loadInProgress(View.STORYBOOK_CREATOR);
+        if (savedProgress && (savedProgress.prompt || savedProgress.pages?.length > 0)) {
+            setShowResumePrompt(true);
+        }
+    }, []);
+
+    const handleResume = () => {
+        const savedProgress = GeminiService.loadInProgress(View.STORYBOOK_CREATOR);
+        if (savedProgress) {
+            setPrompt(savedProgress.prompt || '');
+            setPages(savedProgress.pages || []);
+        }
+        setShowResumePrompt(false);
+    };
+
+    const handleDismissResume = () => {
+        GeminiService.clearInProgress(View.STORYBOOK_CREATOR);
+        setShowResumePrompt(false);
+    };
 
     const handleGenerate = async () => {
         if (!prompt) return;
+        GeminiService.clearInProgress(View.STORYBOOK_CREATOR);
         setIsLoading(true);
         setPages([]);
         setSavedStorybookId(null);
@@ -531,12 +581,104 @@ const StorybookCreatorView: React.FC = () => {
         if (title) {
             const saved = GeminiService.saveStorybook(title, prompt, pages);
             setSavedStorybookId(saved.id);
+            GeminiService.clearInProgress(View.STORYBOOK_CREATOR);
         }
+    };
+
+    const handleExportToPdf = () => {
+        if (pages.length === 0) return;
+
+        const title = pages[0]?.text.split('\n')[0] || "My Storybook";
+        
+        const printWindow = window.open('', '_blank');
+        if (!printWindow) {
+            alert("Please allow popups to export the storybook.");
+            return;
+        }
+
+        const coverPageHtml = pages.map((page, index) => {
+            if (index === 0) { // Cover page
+                const [titleText, author] = page.text.split('\n\nby ');
+                return `
+                    <div class="page cover">
+                        <img src="${page.imageUrl}" alt="Cover Image">
+                        <h1>${titleText || ''}</h1>
+                        ${author ? `<h2>by ${author}</h2>` : ''}
+                    </div>
+                `;
+            }
+            return null;
+        }).join('');
+
+        const contentPagesHtml = pages.slice(1).reduce((acc: string[], page, index) => {
+            if (index % 2 === 0) { // This is a left page
+                const rightPage = pages.slice(1)[index + 1];
+                acc.push(`
+                    <div class="page content-page">
+                        <div class="page-half">
+                            <img src="${page.imageUrl}" alt="Page ${index + 1} illustration">
+                            <p>${page.text}</p>
+                        </div>
+                        ${rightPage ? `
+                        <div class="page-half">
+                            <img src="${rightPage.imageUrl}" alt="Page ${index + 2} illustration">
+                            <p>${rightPage.text}</p>
+                        </div>
+                        ` : '<div class="page-half"></div>'}
+                    </div>
+                `);
+            }
+            return acc;
+        }, []).join('');
+
+        const content = `
+            <html>
+            <head>
+                <title>Export: ${title}</title>
+                <style>
+                    @import url('https://fonts.googleapis.com/css2?family=Merriweather:ital,wght@0,400;0,700;1,400&display=swap');
+                    body { font-family: 'Merriweather', serif; margin: 0; padding: 0; background-color: #f0f0f0; }
+                    @page { size: A4 landscape; margin: 1cm; }
+                    .page {
+                        background-color: white; width: 29.7cm; height: 21cm;
+                        box-sizing: border-box; padding: 1.5cm; page-break-after: always;
+                        display: flex; flex-direction: column; justify-content: center; align-items: center;
+                        border: 1px solid #ccc; margin: 1cm auto;
+                    }
+                    .page.cover { text-align: center; }
+                    .page.content-page { flex-direction: row; gap: 2cm; align-items: stretch; }
+                    .page-half { width: 50%; display: flex; flex-direction: column; }
+                    img { max-width: 100%; max-height: 50%; object-fit: contain; border-radius: 8px; margin-bottom: 1em; }
+                    .page.content-page img { max-height: 60%; }
+                    .page.content-page p { font-size: 14pt; line-height: 1.6; overflow-y: auto; flex-grow: 1; }
+                    h1 { font-size: 28pt; margin-bottom: 0.5em; }
+                    h2 { font-size: 18pt; font-style: italic; color: #555; margin-top: 0; }
+                    p { font-size: 16pt; line-height: 1.5; }
+                    @media print {
+                        body { background-color: white; }
+                        .page { margin: 0; border: none; }
+                    }
+                </style>
+            </head>
+            <body>
+                ${coverPageHtml}
+                ${contentPagesHtml}
+            </body>
+            </html>
+        `;
+
+        printWindow.document.write(content);
+        printWindow.document.close();
+        printWindow.focus();
+        printWindow.onload = () => {
+            printWindow.print();
+        };
     };
     
     return (
         <div className="space-y-6">
             <ViewHeader icon={BookOpenIcon} title="Storybook Creator" description="Enter a topic and watch Gemini create a fully illustrated, high-quality storybook from start to finish." />
+            {showResumePrompt && <ResumePrompt onResume={handleResume} onDismiss={handleDismissResume} />}
             <textarea
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
@@ -555,13 +697,22 @@ const StorybookCreatorView: React.FC = () => {
                 <div className="space-y-8 mt-8">
                      <div className="flex justify-between items-center border-b border-slate-600 pb-2 mb-8">
                         <h3 className="text-2xl font-bold text-brand-text">Your Storybook</h3>
-                        <button
-                            onClick={handleSaveStorybook}
-                            disabled={!!savedStorybookId}
-                            className="bg-brand-accent text-white font-semibold py-2 px-4 rounded-lg disabled:opacity-50 hover:opacity-90 transition-all shadow-md"
-                        >
-                            {savedStorybookId ? 'Saved!' : 'Save Storybook'}
-                        </button>
+                        <div className="flex items-center space-x-2">
+                             <button
+                                onClick={handleExportToPdf}
+                                className="flex items-center space-x-2 bg-slate-600 text-white font-semibold py-2 px-4 rounded-lg hover:bg-slate-500 transition-all shadow-md"
+                            >
+                                <DownloadIcon className="h-5 w-5"/>
+                                <span>Export to PDF</span>
+                            </button>
+                            <button
+                                onClick={handleSaveStorybook}
+                                disabled={!!savedStorybookId}
+                                className="bg-brand-accent text-white font-semibold py-2 px-4 rounded-lg disabled:opacity-50 hover:opacity-90 transition-all shadow-md"
+                            >
+                                {savedStorybookId ? 'Saved!' : 'Save Storybook'}
+                            </button>
+                        </div>
                     </div>
                     <div className="w-full p-4 sm:p-8 bg-slate-800/50 rounded-xl" style={{ backgroundImage: `url('data:image/svg+xml,%3Csvg width="100" height="100" viewBox="0 0 100" 100" xmlns="http://www.w3.org/2000/svg"%3E%3Cpath d="M22.5 25.414l-2.828-2.828L17.5 20.414l2.828 2.828L22.5 25.414zM20.414 17.5l2.828-2.828L25.414 12.5l-2.828 2.828L20.414 17.5zM12.5 25.414L9.672 22.586 7.5 20.414l2.828-2.828L12.5 19.586l-2.828 2.828L12.5 25.414z" fill="%232c3e50" fill-opacity="0.1" fill-rule="evenodd"/%3E%3C/svg%3E')`}}>
                       <StorybookViewer pages={pages} />
@@ -1127,9 +1278,44 @@ const LessonPlanGeneratorView: React.FC = () => {
     const [topic, setTopic] = useState('');
     const [plan, setPlan] = useState('');
     const [isLoading, setIsLoading] = useState(false);
+    const [showResumePrompt, setShowResumePrompt] = useState(false);
+
+    // Auto-save logic
+    useEffect(() => {
+        const interval = setInterval(() => {
+            if (topic || plan) {
+                GeminiService.saveInProgress(View.LESSON_PLAN_GENERATOR, { topic, plan });
+            }
+        }, 60000); // Every 60 seconds
+
+        return () => clearInterval(interval);
+    }, [topic, plan]);
+
+    // Resume logic on mount
+    useEffect(() => {
+        const savedProgress = GeminiService.loadInProgress(View.LESSON_PLAN_GENERATOR);
+        if (savedProgress && (savedProgress.topic || savedProgress.plan)) {
+            setShowResumePrompt(true);
+        }
+    }, []);
+    
+    const handleResume = () => {
+        const savedProgress = GeminiService.loadInProgress(View.LESSON_PLAN_GENERATOR);
+        if (savedProgress) {
+            setTopic(savedProgress.topic || '');
+            setPlan(savedProgress.plan || '');
+        }
+        setShowResumePrompt(false);
+    };
+
+    const handleDismissResume = () => {
+        GeminiService.clearInProgress(View.LESSON_PLAN_GENERATOR);
+        setShowResumePrompt(false);
+    };
 
     const handleGenerate = async () => {
         if (!topic) return;
+        GeminiService.clearInProgress(View.LESSON_PLAN_GENERATOR);
         setIsLoading(true);
         setPlan('');
         try {
@@ -1143,10 +1329,25 @@ const LessonPlanGeneratorView: React.FC = () => {
             setIsLoading(false);
         }
     };
+    
+    const handleExport = (format: 'txt' | 'md') => {
+        if (!plan) return;
+        const filename = `${topic.slice(0, 20).replace(/\s+/g, '_') || 'lesson_plan'}.${format}`;
+        const blob = new Blob([plan], { type: `text/${format === 'md' ? 'markdown' : 'plain'}` });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    };
 
     return (
         <div className="space-y-6">
             <ViewHeader icon={ClipboardListIcon} title="Lesson Plan Generator" description="Enter a topic to generate a comprehensive and structured lesson plan for your class."/>
+            {showResumePrompt && <ResumePrompt onResume={handleResume} onDismiss={handleDismissResume} />}
             <textarea
                 value={topic}
                 onChange={(e) => setTopic(e.target.value)}
@@ -1165,6 +1366,24 @@ const LessonPlanGeneratorView: React.FC = () => {
                 <Card>
                     <div className="prose prose-invert max-w-none prose-p:text-brand-text prose-headings:text-brand-text">
                         <pre className="whitespace-pre-wrap font-sans bg-transparent p-0">{plan}</pre>
+                    </div>
+                    <div className="mt-4 pt-4 border-t border-slate-600 flex justify-end space-x-2">
+                        <button
+                            onClick={() => handleExport('txt')}
+                            title="Export as Text File"
+                            className="flex items-center space-x-2 bg-slate-600 text-white font-semibold py-2 px-4 rounded-lg hover:bg-slate-500 transition-all shadow-md"
+                        >
+                            <DownloadIcon className="h-5 w-5" />
+                            <span>.txt</span>
+                        </button>
+                        <button
+                            onClick={() => handleExport('md')}
+                            title="Export as Markdown File"
+                            className="flex items-center space-x-2 bg-slate-600 text-white font-semibold py-2 px-4 rounded-lg hover:bg-slate-500 transition-all shadow-md"
+                        >
+                            <DownloadIcon className="h-5 w-5" />
+                            <span>.md</span>
+                        </button>
                     </div>
                 </Card>
             )}
