@@ -1,6 +1,7 @@
-import { GoogleGenAI, Modality, GenerateContentResponse, LiveServerMessage, Blob, Type } from "@google/genai";
-import { View } from './types';
-import type { AspectRatio, ImageFile, GroundingChunk, SavedContent, SavedStorybookPage } from './types';
+// FIX: Rename imported `Blob` to `GenAIBlob` to avoid conflict with the native `Blob` type.
+import { GoogleGenAI, Modality, LiveServerMessage, Blob as GenAIBlob, Type } from "@google/genai";
+import { View, Quiz, QuestionType, StorybookContent, AspectRatio } from './types';
+import type { ImageFile, GroundingChunk, SavedContent, SavedStorybookPage } from './types';
 
 // --- UTILS ---
 
@@ -34,7 +35,8 @@ const encode = (bytes: Uint8Array) => {
   return btoa(binary);
 };
 
-export const createPcmBlob = (data: Float32Array): Blob => {
+// FIX: Update return type to use the renamed `GenAIBlob` type.
+export const createPcmBlob = (data: Float32Array): GenAIBlob => {
     const l = data.length;
     const int16 = new Int16Array(l);
     for (let i = 0; i < l; i++) {
@@ -65,6 +67,58 @@ export const decodeAudioData = async (
   return buffer;
 };
 
+// Helper to convert AudioBuffer to a WAV Blob
+export function bufferToWave(abuffer: AudioBuffer, len: number): Blob {
+    let numOfChan = abuffer.numberOfChannels,
+    length = len * numOfChan * 2 + 44,
+    buffer = new ArrayBuffer(length),
+    view = new DataView(buffer),
+    channels = [],
+    i, sample,
+    offset = 0,
+    pos = 0;
+
+  // write WAVE header
+  setUint32(0x46464952); // "RIFF"
+  setUint32(length - 8); // file length - 8
+  setUint32(0x45564157); // "WAVE"
+  setUint32(0x20746d66); // "fmt " chunk
+  setUint32(16); // length = 16
+  setUint16(1); // PCM (uncompressed)
+  setUint16(numOfChan);
+  setUint32(abuffer.sampleRate);
+  setUint32(abuffer.sampleRate * 2 * numOfChan); // avg. bytes/sec
+  setUint16(numOfChan * 2); // block-align
+  setUint16(16); // 16-bit
+  setUint32(0x61746164); // "data" - chunk
+  setUint32(length - pos - 4); // chunk length
+
+  // write interleaved data
+  for (i = 0; i < abuffer.numberOfChannels; i++)
+    channels.push(abuffer.getChannelData(i));
+
+  while (pos < length - 44) {
+    for (i = 0; i < numOfChan; i++) { // interleave channels
+      sample = Math.max(-1, Math.min(1, channels[i][offset])); // clamp
+      sample = (0.5 + sample < 0 ? sample * 32768 : sample * 32767) | 0; // scale to 16-bit signed int
+      view.setInt16(pos, sample, true); // write 16-bit sample
+      pos += 2;
+    }
+    offset++ // next source sample
+  }
+
+  function setUint16(data: number) {
+    view.setUint16(pos, data, true);
+    pos += 2;
+  }
+
+  function setUint32(data: number) {
+    view.setUint32(pos, data, true);
+    pos += 4;
+  }
+
+  return new Blob([buffer], { type: "audio/wav" });
+}
 
 // --- LOCALSTORAGE SERVICES ---
 
@@ -187,6 +241,128 @@ export const clearInProgress = (view: View): void => {
 
 const getAiClient = () => new GoogleGenAI({ apiKey: process.env.API_KEY });
 
+export const generateStorybookContent = async (prompt: string, audience: string, genre: string, tone: string): Promise<StorybookContent> => {
+    const ai = getAiClient();
+    
+    const fullPrompt = `
+    You are a master storyteller and creative director for a children's book publishing house. Your task is to generate the complete text content and a detailed art direction guide for a new, high-quality illustrated book.
+
+    **Core Concept:**
+    - Topic: "${prompt}"
+    - Target Audience: "${audience}"
+    - Genre: ${genre === 'Any' ? 'You have creative freedom to choose the most fitting and engaging genre.' : genre}
+    - Tone: ${tone === 'Any' ? 'You have creative freedom to choose the most fitting and engaging tone.' : tone}
+
+    **CRITICAL INSTRUCTIONS:**
+    1.  **Age Appropriateness:** The vocabulary, themes, and complexity of the story MUST be perfectly tailored to the "${audience}". A story for an "Adult Learner" must feel sophisticated, while a story for a "Toddler" must be extremely simple. Do NOT use childish language for older audiences.
+    2.  **Coherent Narrative:** The story must be a complete, seamless narrative from beginning to end, with a clear plot and character development appropriate for the story's length.
+    3.  **Detailed Art Direction:** The "illustrationStyleGuide" is the most important part. It must be extremely detailed to ensure visual consistency across all pages. It should describe:
+        - Main character(s): appearance, clothing, consistent features.
+        - Color palette: specific colors, mood (e.g., warm, muted, vibrant).
+        - Style: overall artistic style (e.g., whimsical, realistic, cartoonish).
+        - Mood: the emotional feel of the illustrations (e.g., adventurous, serene, mysterious).
+
+    **Output Format:**
+    Your response MUST be a single JSON object with the following exact structure:
+    {
+      "title": "A short, magical, and catchy title for the book.",
+      "authorName": "An inventive and creative-sounding author's name.",
+      "illustrationStyleGuide": "The detailed art direction guide as described above.",
+      "storyPages": ["A short paragraph for page 1.", "A short paragraph for page 2.", "..."]
+    }
+    `;
+
+    const response = await ai.models.generateContent({
+        model: "gemini-2.5-pro",
+        contents: fullPrompt,
+        config: {
+            responseMimeType: "application/json",
+            responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                    title: { type: Type.STRING },
+                    authorName: { type: Type.STRING },
+                    illustrationStyleGuide: { type: Type.STRING },
+                    storyPages: {
+                        type: Type.ARRAY,
+                        items: { type: Type.STRING }
+                    }
+                },
+                required: ["title", "authorName", "illustrationStyleGuide", "storyPages"]
+            },
+        },
+    });
+
+    const jsonText = response.text.trim();
+    try {
+        return JSON.parse(jsonText) as StorybookContent;
+    } catch (e) {
+        console.error("Failed to parse storybook content JSON:", e);
+        throw new Error("The AI returned an invalid format for the storybook.");
+    }
+};
+
+
+export const generateAssessment = async (
+    sourceText: string,
+    numQuestions: number,
+    questionTypes: QuestionType[],
+    difficulty: string
+): Promise<Quiz> => {
+    const ai = getAiClient();
+
+    const prompt = `Based on the following text, create a quiz titled "Quiz on the Material". The quiz should have exactly ${numQuestions} questions. 
+The difficulty level for the questions should be ${difficulty}.
+The questions should be of the following types: ${questionTypes.join(', ')}.
+
+Source Text:
+---
+${sourceText}
+---
+
+Generate the quiz in the specified JSON format.`;
+
+    const response = await ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: prompt,
+        config: {
+            responseMimeType: "application/json",
+            responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                    title: { type: Type.STRING },
+                    questions: {
+                        type: Type.ARRAY,
+                        items: {
+                            type: Type.OBJECT,
+                            properties: {
+                                question: { type: Type.STRING },
+                                type: { type: Type.STRING },
+                                options: {
+                                    type: Type.ARRAY,
+                                    items: { type: Type.STRING },
+                                    nullable: true
+                                },
+                                answer: { type: Type.STRING }
+                            },
+                            required: ["question", "type", "answer"]
+                        }
+                    }
+                },
+                required: ["title", "questions"]
+            },
+        },
+    });
+
+    const jsonText = response.text.trim();
+    try {
+        return JSON.parse(jsonText) as Quiz;
+    } catch (e) {
+        console.error("Failed to parse quiz JSON:", e);
+        throw new Error("The AI returned an invalid format for the quiz.");
+    }
+};
+
 export const editImage = async (prompt: string, image: ImageFile): Promise<string> => {
     const ai = getAiClient();
     const response = await ai.models.generateContent({
@@ -219,36 +395,26 @@ export const editImage = async (prompt: string, image: ImageFile): Promise<strin
     throw new Error("Image editing failed. The response may have been empty or blocked.");
 };
 
-export const generateImage = async (prompt: string): Promise<string> => {
+export const generateImage = async (prompt: string, aspectRatio: AspectRatio): Promise<string> => {
     const ai = getAiClient();
-    const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash-image',
-        contents: {
-            parts: [
-                { text: prompt },
-            ],
-        },
+    const response = await ai.models.generateImages({
+        model: 'imagen-4.0-generate-001',
+        prompt: prompt,
         config: {
-            responseModalities: [Modality.IMAGE],
+          numberOfImages: 1,
+          outputMimeType: 'image/jpeg',
+          aspectRatio: aspectRatio,
         },
     });
 
-    const content = response?.candidates?.[0]?.content;
-    if (content?.parts) {
-        for (const part of content.parts) {
-            if (part.inlineData) {
-                const base64ImageBytes: string = part.inlineData.data;
-                return `data:image/png;base64,${base64ImageBytes}`;
-            }
-        }
+    const base64ImageBytes = response.generatedImages[0]?.image?.imageBytes;
+    if (base64ImageBytes) {
+         return `data:image/jpeg;base64,${base64ImageBytes}`;
     }
 
-    const blockReason = response?.promptFeedback?.blockReason;
-    if (blockReason) {
-        throw new Error(`Image generation was blocked. Reason: ${blockReason}`);
-    }
     throw new Error("Image generation failed. The response may have been empty or blocked.");
 };
+
 
 export const generateVideoVeo = async (prompt: string, aspectRatio: '16:9' | '9:16', image?: ImageFile) => {
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY }); // Re-init to get latest key
@@ -290,7 +456,7 @@ export const analyzeImage = async (prompt: string, image: ImageFile): Promise<st
     return response.text;
 };
 
-export const textToSpeech = async (text: string): Promise<AudioBuffer> => {
+export const textToSpeech = async (text: string, voiceName: string): Promise<AudioBuffer> => {
     const ai = getAiClient();
     const response = await ai.models.generateContent({
         model: "gemini-2.5-flash-preview-tts",
@@ -299,7 +465,7 @@ export const textToSpeech = async (text: string): Promise<AudioBuffer> => {
             responseModalities: [Modality.AUDIO],
             speechConfig: {
                 voiceConfig: {
-                    prebuiltVoiceConfig: { voiceName: 'Kore' },
+                    prebuiltVoiceConfig: { voiceName },
                 },
             },
         },
